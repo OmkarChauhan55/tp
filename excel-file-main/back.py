@@ -17,7 +17,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 main = FastAPI(
     title="HackRx Retrieval System",
     version="1.0.0",
-    description="LLM-powered API to retrieve answers from insurance policies using LangChain & Gemini."
+    description="LLM-powered API to retrieve short, accurate answers from insurance policies."
 )
 
 # 🌐 CORS settings
@@ -73,8 +73,8 @@ async def run_hackrx(body: AskRequest, _: bool = Depends(verify_token)):
     # 📖 Extract text from PDF
     full_text = load_pdf_from_url(body.documents)
 
-    # 📚 Split text into chunks
-    splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
+    # 📚 Split text into small chunks
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_text(full_text)
 
     # 🔍 Vectorstore creation
@@ -84,20 +84,20 @@ async def run_hackrx(body: AskRequest, _: bool = Depends(verify_token)):
     )
     vector_store = FAISS.from_texts(chunks, embedding=embeddings)
 
-    # 📝 Prompt Template
+    # 📝 Concise Prompt Template
     prompt = PromptTemplate(
         input_variables=["context", "question"],
-        template="""Answer the question as accurately as possible using the context below.
-If the answer is not available, respond with: "Answer not available in the context."
+        template="""Answer briefly using the context below.
+If not found, reply: "Not available."
 
 Context:
 {context}
 
 Question: {question}
-Answer:"""
+Short Answer:"""
     )
 
-    # 🤖 Load Gemini model
+    # 🤖 Gemini model
     model = ChatGoogleGenerativeAI(
         model="gemini-1.5-flash",
         temperature=0.3,
@@ -109,8 +109,8 @@ Answer:"""
     # 🔁 Process all questions
     answers = []
     for question in body.questions:
-        docs = vector_store.similarity_search(question)
+        docs = vector_store.similarity_search(question, k=2)
         result = chain({"input_documents": docs, "question": question}, return_only_outputs=True)
-        answers.append(result["output_text"])
+        answers.append(result["output_text"].strip())
 
     return {"answers": answers}
