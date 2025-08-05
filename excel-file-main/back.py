@@ -7,6 +7,8 @@ import tempfile
 import os
 import requests
 
+from functools import lru_cache
+
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
@@ -17,7 +19,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 main = FastAPI(
     title="HackRx Retrieval System",
     version="1.0.0",
-    description="LLM-powered API to retrieve short, accurate answers from insurance policies."
+    description="LLM-powered API to retrieve answers from insurance policies using LangChain & Gemini."
 )
 
 # 🌐 CORS settings
@@ -67,40 +69,43 @@ def load_pdf_from_url(pdf_url: str) -> str:
     os.unlink(temp_path)
     return full_text
 
-# 🧠 Q&A endpoint
-@main.post("/api/v1/hackrx/run", tags=["HackRx"])
-async def run_hackrx(body: AskRequest, _: bool = Depends(verify_token)):
-    # 📖 Extract text from PDF
-    full_text = load_pdf_from_url(body.documents)
-
-    # 📚 Split text into small chunks
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(full_text)
-
-    # 🔍 Vectorstore creation
+# ⚡ Cache vectorstore to avoid repeated work
+@lru_cache(maxsize=10)
+def get_cached_vectorstore(doc_url: str):
+    full_text = load_pdf_from_url(doc_url)
+    chunks = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000).split_text(full_text)
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/embedding-001",
         google_api_key=GOOGLE_API_KEY
     )
-    vector_store = FAISS.from_texts(chunks, embedding=embeddings)
+    return FAISS.from_texts(chunks, embedding=embeddings)
 
-    # 📝 Concise Prompt Template
+# 🧠 Q&A endpoint
+@main.post("/api/v1/hackrx/run", tags=["HackRx"])
+async def run_hackrx(body: AskRequest, _: bool = Depends(verify_token)):
+    # ⚡ Get cached vectorstore
+    vector_store = get_cached_vectorstore(body.documents)
+
+    # 📝 Prompt Template (Strict and Concise)
     prompt = PromptTemplate(
         input_variables=["context", "question"],
-        template="""Answer briefly using the context below.
-If not found, reply: "Not available."
+        template="""You are an expert assistant.
+
+Answer the following question using ONLY the context below.
+Respond word-to-word from the policy where possible. Do NOT add extra explanation.
+If not found, just say: "Answer not available in the context."
 
 Context:
 {context}
 
 Question: {question}
-Short Answer:"""
+Strict Answer:"""
     )
 
-    # 🤖 Gemini model
+    # 🤖 Load Gemini model
     model = ChatGoogleGenerativeAI(
         model="gemini-1.5-flash",
-        temperature=0.3,
+        temperature=0.2,
         google_api_key=GOOGLE_API_KEY
     )
 
@@ -109,8 +114,8 @@ Short Answer:"""
     # 🔁 Process all questions
     answers = []
     for question in body.questions:
-        docs = vector_store.similarity_search(question, k=2)
+        docs = vector_store.similarity_search(question, k=1)  # Focused context
         result = chain({"input_documents": docs, "question": question}, return_only_outputs=True)
-        answers.append(result["output_text"].strip())
+        answers.append(result["output_text"].strip())  # Clean output
 
     return {"answers": answers}
